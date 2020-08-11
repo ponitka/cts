@@ -113,6 +113,32 @@ export class GPUTest extends Fixture {
     });
   }
 
+  expectEqualBuffers(
+    first: GPUBuffer,
+    firstOffset: number,
+    second: GPUBuffer,
+    secondOffset: number,
+    size: number
+  ): void {
+    const firstToMap = this.createCopyForMapRead(first, firstOffset, size);
+    const secondToMap = this.createCopyForMapRead(second, secondOffset, size);
+
+    this.eventualAsyncExpectation(async niceStack => {
+      await secondToMap.mapAsync(GPUMapMode.READ);
+      await firstToMap.mapAsync(GPUMapMode.READ);
+      const check = this.checkBuffer(
+        new Uint8Array(firstToMap.getMappedRange()),
+        new Uint8Array(secondToMap.getMappedRange())
+      );
+      if (check !== undefined) {
+        niceStack.message = check;
+        this.rec.expectationFailed(niceStack);
+      }
+      firstToMap.destroy();
+      secondToMap.destroy();
+    });
+  }
+
   expectBuffer(actual: Uint8Array, exp: Uint8Array): void {
     const check = this.checkBuffer(actual, exp);
     if (check !== undefined) {
