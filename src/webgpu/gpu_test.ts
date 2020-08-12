@@ -3,6 +3,7 @@ import { DevicePool, TestOOMedShouldAttemptGC } from '../common/framework/gpu/de
 import { attemptGarbageCollection } from '../common/framework/util/collect_garbage.js';
 import { assert } from '../common/framework/util/util.js';
 
+import { align } from './util/math.js';
 import {
   fillTextureDataWithTexelValue,
   getTextureCopyLayout,
@@ -98,13 +99,15 @@ export class GPUTest extends Fixture {
   // TODO: add an expectContents for textures, which logs data: uris on failure
 
   expectContents(src: GPUBuffer, expected: TypedArrayBufferView, srcOffset: number = 0): void {
-    const dst = this.createCopyForMapRead(src, srcOffset, expected.buffer.byteLength);
+    const byteLength = expected.byteLength;
+    const alignedByteLength = align(byteLength, 4);
+    const dst = this.createCopyForMapRead(src, srcOffset, alignedByteLength); //expected.buffer.byteLength);
 
     this.eventualAsyncExpectation(async niceStack => {
       const constructor = expected.constructor as TypedArrayBufferViewConstructor;
       await dst.mapAsync(GPUMapMode.READ);
       const actual = new constructor(dst.getMappedRange());
-      const check = this.checkBuffer(actual, expected);
+      const check = this.checkBuffer(actual.slice(0, byteLength), expected.slice(0, byteLength));
       if (check !== undefined) {
         niceStack.message = check;
         this.rec.expectationFailed(niceStack);
@@ -120,15 +123,16 @@ export class GPUTest extends Fixture {
     secondOffset: number,
     size: number
   ): void {
-    const firstToMap = this.createCopyForMapRead(first, firstOffset, size);
-    const secondToMap = this.createCopyForMapRead(second, secondOffset, size);
+    const alignedSize = align(size, 4);
+    const firstToMap = this.createCopyForMapRead(first, firstOffset, alignedSize);
+    const secondToMap = this.createCopyForMapRead(second, secondOffset, alignedSize);
 
     this.eventualAsyncExpectation(async niceStack => {
       await secondToMap.mapAsync(GPUMapMode.READ);
       await firstToMap.mapAsync(GPUMapMode.READ);
       const check = this.checkBuffer(
-        new Uint8Array(firstToMap.getMappedRange()),
-        new Uint8Array(secondToMap.getMappedRange())
+        new Uint8Array(firstToMap.getMappedRange()).slice(0, size),
+        new Uint8Array(secondToMap.getMappedRange()).slice(0, size)
       );
       if (check !== undefined) {
         niceStack.message = check;
