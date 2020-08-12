@@ -13,7 +13,7 @@ import { getTextureCopyLayout, TextureCopyLayout } from '../../util/texture/layo
 function getTexelOffsetInBytes(
   textureDataLayout: GPUTextureDataLayout,
   format: GPUTextureFormat,
-  texel: Required<GPUOrigin3DDict>,
+  texel: Required<GPUOrigin3DDict>, // coordinates of the first texel in the texel block
   origin: Required<GPUOrigin3DDict> = { x: 0, y: 0, z: 0 }
 ): number {
   assert(texel.x >= origin.x && texel.y >= origin.y && texel.z >= origin.z);
@@ -32,14 +32,15 @@ function getTexelOffsetInBytes(
   );
 }
 
-// Offset for a particular texel block in the list of texel blocks
-function getTexelOffsetInBlocks(
+function getTexeBlockIndex(
   format: GPUTextureFormat,
-  texel: Required<GPUOrigin3DDict>,
+  texel: Required<GPUOrigin3DDict>, // coordinates of the first texel in the texel block
   size: GPUExtent3DDict
 ): number {
   assert(texel.x % kTextureFormatInfo[format].blockWidth! === 0);
   assert(texel.y % kTextureFormatInfo[format].blockHeight! === 0);
+  assert(size.width % kTextureFormatInfo[format].blockWidth! === 0);
+  assert(size.height % kTextureFormatInfo[format].blockHeight! === 0);
 
   return (
     texel.x / kTextureFormatInfo[format].blockWidth! +
@@ -95,7 +96,7 @@ class FullTextureData {
           device.defaultQueue.submit([encoder.finish()]);
 
           this.texelBlocks[
-            getTexelOffsetInBlocks(format, texel, {
+            getTexeBlockIndex(format, texel, {
               width: mipSize[0],
               height: mipSize[1],
               depth: mipSize[2],
@@ -115,7 +116,6 @@ class FullTextureData {
     device: GPUDevice
   ): void {
     const bytesPerBlock = kTextureFormatInfo[format].bytesPerBlock!;
-    console.log(bytesPerBlock);
 
     for (let x = 0; x < size.width / kTextureFormatInfo[format].blockWidth!; ++x) {
       for (let y = 0; y < size.height / kTextureFormatInfo[format].blockHeight!; ++y) {
@@ -126,7 +126,7 @@ class FullTextureData {
             z: origin.z + z,
           };
           const dataOffset = getTexelOffsetInBytes(textureDataLayout, format, texel, origin);
-          const blockIndex = getTexelOffsetInBlocks(format, texel, size);
+          const blockIndex = getTexeBlockIndex(format, texel, size);
           device.defaultQueue.writeBuffer(
             this.texelBlocks[blockIndex],
             0,
@@ -268,7 +268,7 @@ class CopyBetweenLinearDataAndTextureTest extends GPUTest {
             z,
           };
           const texelOffset = getTexelOffsetInBytes({ bytesPerRow, rowsPerImage }, format, texel);
-          const blockIndex = getTexelOffsetInBlocks(format, texel, size);
+          const blockIndex = getTexeBlockIndex(format, texel, size);
           this.expectEqualBuffers(
             buffer,
             texelOffset,
@@ -299,7 +299,6 @@ class CopyBetweenLinearDataAndTextureTest extends GPUTest {
     }
   ): void {
     const data = this.generateData(dataSize);
-    console.log('dataSize = ' + dataSize);
 
     switch (checkMethod) {
       case 'PartialCopyT2B': {
@@ -456,7 +455,6 @@ g.test('copy_with_data_paddings')
     const bytesPerRow =
       align(t.bytesInACompleteRow(copyWidth, format), bytesPerRowAlignment) +
       bytesPerRowPadding * bytesPerRowAlignment;
-    console.log('bytesPerRow = ' + bytesPerRow);
     const size = { width: copyWidth, height: copyHeight, depth: copyDepth };
 
     const minDataSize =

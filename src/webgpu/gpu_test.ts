@@ -100,14 +100,19 @@ export class GPUTest extends Fixture {
 
   expectContents(src: GPUBuffer, expected: TypedArrayBufferView, srcOffset: number = 0): void {
     const byteLength = expected.byteLength;
-    const alignedByteLength = align(byteLength, 4);
-    const dst = this.createCopyForMapRead(src, srcOffset, alignedByteLength); //expected.buffer.byteLength);
+    const alignedOffset = Math.floor(srcOffset / 4) * 4;
+    const offsetDifference = srcOffset - alignedOffset;
+    const alignedByteLength = align(byteLength + offsetDifference, 4);
+    const dst = this.createCopyForMapRead(src, alignedOffset, alignedByteLength); //expected.buffer.byteLength);
 
     this.eventualAsyncExpectation(async niceStack => {
       const constructor = expected.constructor as TypedArrayBufferViewConstructor;
       await dst.mapAsync(GPUMapMode.READ);
       const actual = new constructor(dst.getMappedRange());
-      const check = this.checkBuffer(actual.slice(0, byteLength), expected.slice(0, byteLength));
+      const check = this.checkBuffer(
+        actual.slice(offsetDifference, offsetDifference + byteLength),
+        expected
+      );
       if (check !== undefined) {
         niceStack.message = check;
         this.rec.expectationFailed(niceStack);
