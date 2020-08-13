@@ -83,6 +83,9 @@ export class GPUTest extends Fixture {
   }
 
   createCopyForMapRead(src: GPUBuffer, srcOffset: number, size: number): GPUBuffer {
+    assert(srcOffset % 4 === 0);
+    assert(size % 4 === 0);
+
     const dst = this.device.createBuffer({
       size,
       usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
@@ -128,16 +131,28 @@ export class GPUTest extends Fixture {
     secondOffset: number,
     size: number
   ): void {
-    const alignedSize = align(size, 4);
-    const firstToMap = this.createCopyForMapRead(first, firstOffset, alignedSize);
-    const secondToMap = this.createCopyForMapRead(second, secondOffset, alignedSize);
+    const firstAlignedOffset = Math.floor(firstOffset / 4) * 4;
+    const firstOffsetDifference = firstOffset - firstAlignedOffset;
+    const firstAlignedSize = align(size + firstOffsetDifference, 4);
+    const firstToMap = this.createCopyForMapRead(first, firstAlignedOffset, firstAlignedSize);
+
+    const secondAlignedOffset = Math.floor(secondOffset / 4) * 4;
+    const secondOffsetDifference = secondOffset - secondAlignedOffset;
+    const secondAlignedSize = align(size + secondOffsetDifference, 4);
+    const secondToMap = this.createCopyForMapRead(second, secondAlignedOffset, secondAlignedSize);
 
     this.eventualAsyncExpectation(async niceStack => {
       await secondToMap.mapAsync(GPUMapMode.READ);
       await firstToMap.mapAsync(GPUMapMode.READ);
       const check = this.checkBuffer(
-        new Uint8Array(firstToMap.getMappedRange()).slice(0, size),
-        new Uint8Array(secondToMap.getMappedRange()).slice(0, size)
+        new Uint8Array(firstToMap.getMappedRange()).slice(
+          firstOffsetDifference,
+          firstOffsetDifference + size
+        ),
+        new Uint8Array(secondToMap.getMappedRange()).slice(
+          secondOffsetDifference,
+          secondOffsetDifference + size
+        )
       );
       if (check !== undefined) {
         niceStack.message = check;

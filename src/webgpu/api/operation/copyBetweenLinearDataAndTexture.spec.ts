@@ -53,7 +53,7 @@ function getTexeBlockIndex(
 }
 
 class FullTextureData {
-  texelBlocks: Array<GPUBuffer> = new Array<GPUBuffer>(50);
+  texelBlocks: Array<GPUBuffer> = new Array<GPUBuffer>(500);
 
   constructor(
     textureCopyView: GPUTextureCopyView,
@@ -95,13 +95,12 @@ class FullTextureData {
           );
           device.defaultQueue.submit([encoder.finish()]);
 
-          this.texelBlocks[
-            getTexeBlockIndex(format, texel, {
-              width: mipSize[0],
-              height: mipSize[1],
-              depth: mipSize[2],
-            })
-          ] = buffer;
+          const blockIndex = getTexeBlockIndex(format, texel, {
+            width: mipSize[0],
+            height: mipSize[1],
+            depth: mipSize[2],
+          });
+          this.texelBlocks[blockIndex] = buffer;
         }
       }
     }
@@ -214,6 +213,7 @@ class CopyBetweenLinearDataAndTextureTest extends GPUTest {
 
   partialCheck(
     textureCopyView: GPUTextureCopyView,
+    origin: Required<GPUOrigin3DDict>,
     textureDataLayout: GPUTextureDataLayout,
     format: GPUTextureFormat,
     size: GPUExtent3DDict,
@@ -231,8 +231,12 @@ class CopyBetweenLinearDataAndTextureTest extends GPUTest {
     // We check the data row by row.
     for (let y = 0; y < size.height / kTextureFormatInfo[format].blockHeight!; ++y) {
       for (let z = 0; z < size.depth; ++z) {
-        const texel = { x: 0, y: y * kTextureFormatInfo[format].blockHeight!, z };
-        const rowOffset = getTexelOffsetInBytes(textureDataLayout, format, texel);
+        const texel = {
+          x: origin.x,
+          y: origin.y + y * kTextureFormatInfo[format].blockHeight!,
+          z: origin.z + z,
+        };
+        const rowOffset = getTexelOffsetInBytes(textureDataLayout, format, texel, origin);
         const rowLength =
           (size.width / kTextureFormatInfo[format].blockWidth!) *
           kTextureFormatInfo[format].bytesPerBlock!;
@@ -249,6 +253,7 @@ class CopyBetweenLinearDataAndTextureTest extends GPUTest {
   ): void {
     const { mipSize, bytesPerRow, rowsPerImage, byteLength } = fullTextureCopyLayout;
     const size = { width: mipSize[0], height: mipSize[1], depth: mipSize[2] };
+    const { mipLevel, texture } = textureCopyView;
 
     const buffer = this.device.createBuffer({
       size: byteLength + 4,
@@ -256,7 +261,7 @@ class CopyBetweenLinearDataAndTextureTest extends GPUTest {
     });
 
     const encoder = this.device.createCommandEncoder();
-    encoder.copyTextureToBuffer(textureCopyView, { buffer, bytesPerRow, rowsPerImage }, size);
+    encoder.copyTextureToBuffer({ mipLevel, texture }, { buffer, bytesPerRow, rowsPerImage }, size);
     this.device.defaultQueue.submit([encoder.finish()]);
 
     for (let x = 0; x < mipSize[0] / kTextureFormatInfo[format].blockWidth!; ++x) {
@@ -267,7 +272,11 @@ class CopyBetweenLinearDataAndTextureTest extends GPUTest {
             y: y * kTextureFormatInfo[format].blockHeight!,
             z,
           };
-          const texelOffset = getTexelOffsetInBytes({ bytesPerRow, rowsPerImage }, format, texel);
+          const texelOffset = getTexelOffsetInBytes(
+            { offset: 0, bytesPerRow, rowsPerImage },
+            format,
+            texel
+          );
           const blockIndex = getTexeBlockIndex(format, texel, size);
           this.expectEqualBuffers(
             buffer,
@@ -298,13 +307,20 @@ class CopyBetweenLinearDataAndTextureTest extends GPUTest {
       checkMethod: string;
     }
   ): void {
-    const data = this.generateData(dataSize);
+    const data = this.generateData(align(dataSize, 4) + 4);
 
     switch (checkMethod) {
       case 'PartialCopyT2B': {
         this.initTexture(textureCopyView, textureDataLayout, size, data, initMethod);
 
-        this.partialCheck(textureCopyView, textureDataLayout, textureDesc.format, size, data);
+        this.partialCheck(
+          textureCopyView,
+          origin,
+          textureDataLayout,
+          textureDesc.format,
+          size,
+          data
+        );
 
         break;
       }
@@ -407,8 +423,6 @@ g.test('copy_with_data_paddings')
     params()
       .combine(poptions('initMethod', kAllInitMethods))
       .combine(poptions('checkMethod', kAllCheckMethods))
-      .combine(poptions('format', kTextureFormats))
-      .filter(formatCopyableWithMethod)
       .combine([
         { bytesPerRowPadding: 0, rowsPerImagePaddingInBlocks: 0 }, // no padding
         { bytesPerRowPadding: 0, rowsPerImagePaddingInBlocks: 6 }, // rowsPerImage padding
@@ -416,6 +430,7 @@ g.test('copy_with_data_paddings')
         { bytesPerRowPadding: 15, rowsPerImagePaddingInBlocks: 17 }, // both paddings
       ])
       .combine([
+        { copyWidthInBlocks: 2, copyHeightInBlocks: 3, copyDepth: 3, offsetInBlocks: 0 },
         { copyWidthInBlocks: 3, copyHeightInBlocks: 4, copyDepth: 5, offsetInBlocks: 0 }, // standard copy
         { copyWidthInBlocks: 5, copyHeightInBlocks: 4, copyDepth: 3, offsetInBlocks: 11 }, // standard copy, offset > 0
         { copyWidthInBlocks: 256, copyHeightInBlocks: 3, copyDepth: 2, offsetInBlocks: 0 }, // copyWidth is 256-aligned
@@ -427,6 +442,8 @@ g.test('copy_with_data_paddings')
         //{ copyWidthInBlocks: 5, copyHeightInBlocks: 4, copyDepth: 1, offsetInBlocks: 0 }, // copyDepth = 1
         //{ copyWidthInBlocks: 7, copyHeightInBlocks: 1, copyDepth: 1, offsetInBlocks: 0 }, // copyHeight = 1 and copyDepth = 1
       ])
+      .combine(poptions('format', kTextureFormats))
+      .filter(formatCopyableWithMethod)
   )
   .fn(async t => {
     const {
