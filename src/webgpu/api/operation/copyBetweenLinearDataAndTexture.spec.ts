@@ -1,5 +1,9 @@
-export const description =
-  'writeTexture + copyBufferToTexture + copyTextureToBuffer operation tests.';
+export const description = `writeTexture + copyBufferToTexture + copyTextureToBuffer operation tests.
+* TODO: add another initMethod which renders the texture
+* TODO: check that CopyT2B doesn't overwrite any other bytes
+* TODO: investigate float issues (rg11b10float format tests)
+* TODO: investigate snorm issues (rgba8snorm format tests)
+`;
 
 import { params, poptions } from '../../../common/framework/params_builder.js';
 import { makeTestGroup } from '../../../common/framework/test_group.js';
@@ -9,11 +13,11 @@ import { GPUTest } from '../../gpu_test.js';
 import { align } from '../../util/math.js';
 import { getTextureCopyLayout, TextureCopyLayout } from '../../util/texture/layout.js';
 
-// Offset for a particular texel block in the linear texture data
+// Offset for a particular texel in the linear texture data
 function getTexelOffsetInBytes(
   textureDataLayout: GPUTextureDataLayout,
   format: GPUTextureFormat,
-  texel: Required<GPUOrigin3DDict>, // coordinates of the first texel in the texel block
+  texel: Required<GPUOrigin3DDict>,
   origin: Required<GPUOrigin3DDict> = { x: 0, y: 0, z: 0 }
 ): number {
   assert(texel.x >= origin.x && texel.y >= origin.y && texel.z >= origin.z);
@@ -30,113 +34,6 @@ function getTexelOffsetInBytes(
     ((texel.x - origin.x) / kTextureFormatInfo[format].blockWidth!) *
       kTextureFormatInfo[format].bytesPerBlock!
   );
-}
-
-function getTexeBlockIndex(
-  format: GPUTextureFormat,
-  texel: Required<GPUOrigin3DDict>, // coordinates of the first texel in the texel block
-  size: GPUExtent3DDict
-): number {
-  assert(texel.x % kTextureFormatInfo[format].blockWidth! === 0);
-  assert(texel.y % kTextureFormatInfo[format].blockHeight! === 0);
-  assert(size.width % kTextureFormatInfo[format].blockWidth! === 0);
-  assert(size.height % kTextureFormatInfo[format].blockHeight! === 0);
-
-  return (
-    texel.x / kTextureFormatInfo[format].blockWidth! +
-    (texel.y / kTextureFormatInfo[format].blockHeight!) *
-      (size.width / kTextureFormatInfo[format].blockWidth!) +
-    texel.z *
-      (size.height / kTextureFormatInfo[format].blockHeight!) *
-      (size.width * kTextureFormatInfo[format].blockWidth!)
-  );
-}
-
-class FullTextureData {
-  texelBlocks: Array<GPUBuffer> = new Array<GPUBuffer>(500);
-
-  constructor(
-    textureCopyView: GPUTextureCopyView,
-    format: GPUTextureFormat,
-    fullTextureCopyLayout: TextureCopyLayout,
-    device: GPUDevice
-  ) {
-    const { mipSize } = fullTextureCopyLayout;
-    const { mipLevel, texture } = textureCopyView;
-    const bytesPerBlock = kTextureFormatInfo[format].bytesPerBlock!;
-
-    for (let x = 0; x < mipSize[0] / kTextureFormatInfo[format].blockWidth!; ++x) {
-      for (let y = 0; y < mipSize[1] / kTextureFormatInfo[format].blockHeight!; ++y) {
-        for (let z = 0; z < mipSize[2]; ++z) {
-          const buffer = device.createBuffer({
-            size: align(bytesPerBlock, 4),
-            usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
-          });
-
-          const texel = {
-            x: x * kTextureFormatInfo[format].blockWidth!,
-            y: y * kTextureFormatInfo[format].blockHeight!,
-            z,
-          };
-
-          const encoder = device.createCommandEncoder();
-          encoder.copyTextureToBuffer(
-            {
-              mipLevel,
-              texture,
-              origin: texel,
-            },
-            { buffer, bytesPerRow: 0 },
-            {
-              width: kTextureFormatInfo[format].blockWidth!,
-              height: kTextureFormatInfo[format].blockHeight!,
-              depth: 1,
-            }
-          );
-          device.defaultQueue.submit([encoder.finish()]);
-
-          const blockIndex = getTexeBlockIndex(format, texel, {
-            width: mipSize[0],
-            height: mipSize[1],
-            depth: mipSize[2],
-          });
-          this.texelBlocks[blockIndex] = buffer;
-        }
-      }
-    }
-  }
-
-  update(
-    format: GPUTextureFormat,
-    textureDataLayout: GPUTextureDataLayout,
-    size: GPUExtent3DDict,
-    origin: Required<GPUOrigin3DDict>,
-    data: Uint8Array,
-    device: GPUDevice
-  ): void {
-    const bytesPerBlock = kTextureFormatInfo[format].bytesPerBlock!;
-
-    for (let x = 0; x < size.width / kTextureFormatInfo[format].blockWidth!; ++x) {
-      for (let y = 0; y < size.height / kTextureFormatInfo[format].blockHeight!; ++y) {
-        for (let z = 0; z < size.depth; ++z) {
-          const texel = {
-            x: origin.x + x * kTextureFormatInfo[format].blockWidth!,
-            y: origin.y + y * kTextureFormatInfo[format].blockHeight!,
-            z: origin.z + z,
-          };
-          const dataOffset = getTexelOffsetInBytes(textureDataLayout, format, texel, origin);
-          const blockIndex = getTexeBlockIndex(format, texel, size);
-          device.defaultQueue.writeBuffer(
-            this.texelBlocks[blockIndex],
-            0,
-            data,
-            dataOffset,
-            align(bytesPerBlock, 4)
-          );
-        }
-      }
-    }
-  }
 }
 
 class CopyBetweenLinearDataAndTextureTest extends GPUTest {
@@ -177,7 +74,7 @@ class CopyBetweenLinearDataAndTextureTest extends GPUTest {
     return arr;
   }
 
-  // Copy data into texture with an appropriate method.
+  // Put data into texture with an appropriate method.
   initTexture(
     textureCopyView: GPUTextureCopyView,
     textureDataLayout: GPUTextureDataLayout,
@@ -211,7 +108,7 @@ class CopyBetweenLinearDataAndTextureTest extends GPUTest {
     }
   }
 
-  partialCheck(
+  check(
     textureCopyView: GPUTextureCopyView,
     origin: Required<GPUOrigin3DDict>,
     textureDataLayout: GPUTextureDataLayout,
@@ -228,7 +125,6 @@ class CopyBetweenLinearDataAndTextureTest extends GPUTest {
     encoder.copyTextureToBuffer(textureCopyView, { buffer, ...textureDataLayout }, size);
     this.device.defaultQueue.submit([encoder.finish()]);
 
-    // We check the data row by row.
     for (let y = 0; y < size.height / kTextureFormatInfo[format].blockHeight!; ++y) {
       for (let z = 0; z < size.depth; ++z) {
         const texel = {
@@ -245,49 +141,97 @@ class CopyBetweenLinearDataAndTextureTest extends GPUTest {
     }
   }
 
-  fullCheck(
-    fullTextureCopyLayout: TextureCopyLayout,
+  getFullData(
     textureCopyView: GPUTextureCopyView,
-    format: GPUTextureFormat,
-    expected: FullTextureData
-  ): void {
-    const { mipSize, bytesPerRow, rowsPerImage, byteLength } = fullTextureCopyLayout;
-    const size = { width: mipSize[0], height: mipSize[1], depth: mipSize[2] };
-    const { mipLevel, texture } = textureCopyView;
-
+    fullTextureCopyLayout: TextureCopyLayout
+  ): GPUBuffer {
+    const { texture, mipLevel } = textureCopyView;
+    const { mipSize, byteLength, bytesPerRow, rowsPerImage } = fullTextureCopyLayout;
     const buffer = this.device.createBuffer({
-      size: byteLength + 4,
+      size: byteLength + 3, // the additional 3 bytes are needed for expectContents
       usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
     });
 
     const encoder = this.device.createCommandEncoder();
-    encoder.copyTextureToBuffer({ mipLevel, texture }, { buffer, bytesPerRow, rowsPerImage }, size);
+    encoder.copyTextureToBuffer(
+      { texture, mipLevel },
+      { buffer, bytesPerRow, rowsPerImage },
+      mipSize
+    );
     this.device.defaultQueue.submit([encoder.finish()]);
 
-    for (let x = 0; x < mipSize[0] / kTextureFormatInfo[format].blockWidth!; ++x) {
-      for (let y = 0; y < mipSize[1] / kTextureFormatInfo[format].blockHeight!; ++y) {
-        for (let z = 0; z < mipSize[2]; ++z) {
-          const texel = {
-            x: x * kTextureFormatInfo[format].blockWidth!,
-            y: y * kTextureFormatInfo[format].blockHeight!,
-            z,
-          };
-          const texelOffset = getTexelOffsetInBytes(
-            { offset: 0, bytesPerRow, rowsPerImage },
-            format,
-            texel
-          );
-          const blockIndex = getTexeBlockIndex(format, texel, size);
-          this.expectEqualBuffers(
-            buffer,
-            texelOffset,
-            expected.texelBlocks[blockIndex],
-            0,
-            kTextureFormatInfo[format].bytesPerBlock!
-          );
+    return buffer;
+  }
+
+  updateFullData(
+    format: GPUTextureFormat,
+    textureDataLayout: GPUTextureDataLayout,
+    fullTextureCopyLayout: TextureCopyLayout,
+    size: GPUExtent3DDict,
+    origin: Required<GPUOrigin3DDict>,
+    fullData: Uint8Array,
+    partialData: Uint8Array
+  ): void {
+    const { bytesPerRow, rowsPerImage } = fullTextureCopyLayout;
+
+    for (let y = 0; y < size.height / kTextureFormatInfo[format].blockHeight!; ++y) {
+      for (let z = 0; z < size.depth; ++z) {
+        const texel = {
+          x: origin.x,
+          y: origin.y + y * kTextureFormatInfo[format].blockHeight!,
+          z: origin.z + z,
+        };
+        const partialDataOffset = getTexelOffsetInBytes(textureDataLayout, format, texel, origin);
+        const fullDataOffset = getTexelOffsetInBytes(
+          { bytesPerRow, rowsPerImage, offset: 0 },
+          format,
+          texel
+        );
+        const rowLength =
+          (size.width / kTextureFormatInfo[format].blockWidth!) *
+          kTextureFormatInfo[format].bytesPerBlock!;
+        for (let b = 0; b < rowLength; ++b) {
+          fullData[fullDataOffset + b] = partialData[partialDataOffset + b];
         }
       }
     }
+  }
+
+  fullCheck(
+    fullTextureCopyLayout: TextureCopyLayout,
+    textureCopyView: GPUTextureCopyView,
+    origin: Required<GPUOrigin3DDict>,
+    textureDataLayout: GPUTextureDataLayout,
+    format: GPUTextureFormat,
+    fullData: GPUBuffer,
+    partialData: Uint8Array
+  ): void {
+    const { texture, mipLevel } = textureCopyView;
+    const { mipSize, bytesPerRow, rowsPerImage, byteLength } = fullTextureCopyLayout;
+    const { dst, begin, end } = this.createAlignedCopyForMapRead(fullData, byteLength, 0);
+
+    this.eventualAsyncExpectation(async _ => {
+      await dst.mapAsync(GPUMapMode.READ);
+      const actual = new Uint8Array(dst.getMappedRange()).slice(begin, end);
+      this.updateFullData(
+        format,
+        textureDataLayout,
+        fullTextureCopyLayout,
+        { width: mipSize[0], height: mipSize[1], depth: mipSize[2] },
+        origin,
+        actual,
+        partialData
+      );
+      this.check(
+        { texture, mipLevel },
+        { x: 0, y: 0, z: 0 },
+        { bytesPerRow, rowsPerImage, offset: 0 },
+        format,
+        { width: mipSize[0], height: mipSize[1], depth: mipSize[2] },
+        actual
+      );
+      dst.destroy();
+    });
   }
 
   testRun(
@@ -313,14 +257,7 @@ class CopyBetweenLinearDataAndTextureTest extends GPUTest {
       case 'PartialCopyT2B': {
         this.initTexture(textureCopyView, textureDataLayout, size, data, initMethod);
 
-        this.partialCheck(
-          textureCopyView,
-          origin,
-          textureDataLayout,
-          textureDesc.format,
-          size,
-          data
-        );
+        this.check(textureCopyView, origin, textureDataLayout, textureDesc.format, size, data);
 
         break;
       }
@@ -332,18 +269,19 @@ class CopyBetweenLinearDataAndTextureTest extends GPUTest {
           { mipLevel: textureCopyView.mipLevel! }
         );
 
-        const fullData = new FullTextureData(
-          textureCopyView,
-          textureDesc.format,
-          fullTextureCopyLayout,
-          this.device
-        );
+        const fullData = this.getFullData(textureCopyView, fullTextureCopyLayout);
 
         this.initTexture(textureCopyView, textureDataLayout, size, data, initMethod);
 
-        fullData.update(textureDesc.format, textureDataLayout, size, origin, data, this.device);
-
-        this.fullCheck(fullTextureCopyLayout, textureCopyView, textureDesc.format, fullData);
+        this.fullCheck(
+          fullTextureCopyLayout,
+          textureCopyView,
+          origin,
+          textureDataLayout,
+          textureDesc.format,
+          fullData,
+          data
+        );
 
         break;
       }

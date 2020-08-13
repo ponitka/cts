@@ -101,7 +101,12 @@ export class GPUTest extends Fixture {
 
   // TODO: add an expectContents for textures, which logs data: uris on failure
 
-  bufferToMap(
+  // Offset and size passed to createCopyForMapRead must be divisible by 4. For that
+  // we might need to copy more bytes from the buffer than we want to map.
+  // begin and end values represent the part of the copied buffer that stores the contents
+  // we initially wanted to map.
+  // The copy might cause an OOB error if the buffer is not big enough.
+  createAlignedCopyForMapRead(
     src: GPUBuffer,
     size: number,
     offset: number
@@ -114,7 +119,11 @@ export class GPUTest extends Fixture {
   }
 
   expectContents(src: GPUBuffer, expected: TypedArrayBufferView, srcOffset: number = 0): void {
-    const { dst, begin, end } = this.bufferToMap(src, expected.byteLength, srcOffset);
+    const { dst, begin, end } = this.createAlignedCopyForMapRead(
+      src,
+      expected.byteLength,
+      srcOffset
+    );
 
     this.eventualAsyncExpectation(async niceStack => {
       const constructor = expected.constructor as TypedArrayBufferViewConstructor;
@@ -126,32 +135,6 @@ export class GPUTest extends Fixture {
         this.rec.expectationFailed(niceStack);
       }
       dst.destroy();
-    });
-  }
-
-  expectEqualBuffers(
-    first: GPUBuffer,
-    firstOffset: number,
-    second: GPUBuffer,
-    secondOffset: number,
-    size: number
-  ): void {
-    const firstToMap = this.bufferToMap(first, size, firstOffset);
-    const secondToMap = this.bufferToMap(second, size, secondOffset);
-
-    this.eventualAsyncExpectation(async niceStack => {
-      await firstToMap.dst.mapAsync(GPUMapMode.READ);
-      await secondToMap.dst.mapAsync(GPUMapMode.READ);
-      const check = this.checkBuffer(
-        new Uint8Array(firstToMap.dst.getMappedRange()).slice(firstToMap.begin, firstToMap.end),
-        new Uint8Array(secondToMap.dst.getMappedRange()).slice(secondToMap.begin, secondToMap.end)
-      );
-      if (check !== undefined) {
-        niceStack.message = check;
-        this.rec.expectationFailed(niceStack);
-      }
-      firstToMap.dst.destroy();
-      secondToMap.dst.destroy();
     });
   }
 
