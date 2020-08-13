@@ -13,27 +13,10 @@ import { GPUTest } from '../../gpu_test.js';
 import { align } from '../../util/math.js';
 import { getTextureCopyLayout, TextureCopyLayout } from '../../util/texture/layout.js';
 
-// Offset for a particular texel in the linear texture data
-function getTexelOffsetInBytes(
-  textureDataLayout: GPUTextureDataLayout,
-  format: GPUTextureFormat,
-  texel: Required<GPUOrigin3DDict>,
-  origin: Required<GPUOrigin3DDict> = { x: 0, y: 0, z: 0 }
-): number {
-  assert(texel.x >= origin.x && texel.y >= origin.y && texel.z >= origin.z);
-  assert((texel.x - origin.x) % kTextureFormatInfo[format].blockWidth! === 0);
-  assert((texel.y - origin.y) % kTextureFormatInfo[format].blockHeight! === 0);
-
-  const { offset, bytesPerRow, rowsPerImage } = textureDataLayout;
-  const bytesPerImage = (rowsPerImage! / kTextureFormatInfo[format].blockHeight!) * bytesPerRow;
-
-  return (
-    offset! +
-    (texel.z - origin.z) * bytesPerImage +
-    ((texel.y - origin.y) / kTextureFormatInfo[format].blockHeight!) * bytesPerRow +
-    ((texel.x - origin.x) / kTextureFormatInfo[format].blockWidth!) *
-      kTextureFormatInfo[format].bytesPerBlock!
-  );
+interface TextureCopyViewWithRequiredOrigin {
+  texture: GPUTexture;
+  mipLevel: number | undefined;
+  origin: Required<GPUOrigin3DDict>;
 }
 
 class CopyBetweenLinearDataAndTextureTest extends GPUTest {
@@ -66,10 +49,54 @@ class CopyBetweenLinearDataAndTextureTest extends GPUTest {
     }
   }
 
+  // Offset for a particular texel in the linear texture data
+  getTexelOffsetInBytes(
+    textureDataLayout: GPUTextureDataLayout,
+    format: GPUTextureFormat,
+    texel: Required<GPUOrigin3DDict>,
+    origin: Required<GPUOrigin3DDict> = { x: 0, y: 0, z: 0 }
+  ): number {
+    const { offset, bytesPerRow, rowsPerImage } = textureDataLayout;
+
+    assert(texel.x >= origin.x && texel.y >= origin.y && texel.z >= origin.z);
+    assert(rowsPerImage! % kTextureFormatInfo[format].blockHeight! === 0);
+    assert(texel.x % kTextureFormatInfo[format].blockWidth! === 0);
+    assert(texel.y % kTextureFormatInfo[format].blockHeight! === 0);
+    assert(origin.x % kTextureFormatInfo[format].blockWidth! === 0);
+    assert(origin.y % kTextureFormatInfo[format].blockHeight! === 0);
+
+    const bytesPerImage = (rowsPerImage! / kTextureFormatInfo[format].blockHeight!) * bytesPerRow;
+
+    return (
+      offset! +
+      (texel.z - origin.z) * bytesPerImage +
+      ((texel.y - origin.y) / kTextureFormatInfo[format].blockHeight!) * bytesPerRow +
+      ((texel.x - origin.x) / kTextureFormatInfo[format].blockWidth!) *
+        kTextureFormatInfo[format].bytesPerBlock!
+    );
+  }
+
+  *iterateBlockRows(
+    size: GPUExtent3DDict,
+    origin: Required<GPUOrigin3DDict>,
+    format: GPUTextureFormat
+  ): Generator<Required<GPUOrigin3DDict>> {
+    assert(size.height % kTextureFormatInfo[format].blockHeight! === 0);
+    for (let y = 0; y < size.height / kTextureFormatInfo[format].blockHeight!; ++y) {
+      for (let z = 0; z < size.depth; ++z) {
+        yield {
+          x: origin.x,
+          y: origin.y + y * kTextureFormatInfo[format].blockHeight!,
+          z: origin.z + z,
+        };
+      }
+    }
+  }
+
   generateData(byteSize: number): Uint8Array {
     const arr = new Uint8Array(byteSize);
     for (let i = 0; i < byteSize; ++i) {
-      arr[i] = i % 251;
+      arr[i] = (i ** 3 + i) % 251;
     }
     return arr;
   }
@@ -78,27 +105,32 @@ class CopyBetweenLinearDataAndTextureTest extends GPUTest {
   initTexture(
     textureCopyView: GPUTextureCopyView,
     textureDataLayout: GPUTextureDataLayout,
-    size: GPUExtent3D,
-    data: Uint8Array,
+    copySize: GPUExtent3D,
+    partialData: Uint8Array,
     method: string
   ): void {
     switch (method) {
       case 'WriteTexture': {
-        this.device.defaultQueue.writeTexture(textureCopyView, data, textureDataLayout, size);
+        this.device.defaultQueue.writeTexture(
+          textureCopyView,
+          partialData,
+          textureDataLayout,
+          copySize
+        );
 
         break;
       }
       case 'CopyB2T': {
         const buffer = this.device.createBuffer({
           mappedAtCreation: true,
-          size: align(data.byteLength, 4),
+          size: align(partialData.byteLength, 4),
           usage: GPUBufferUsage.COPY_SRC,
         });
-        new Uint8Array(buffer.getMappedRange()).set(data);
+        new Uint8Array(buffer.getMappedRange()).set(partialData);
         buffer.unmap();
 
         const encoder = this.device.createCommandEncoder();
-        encoder.copyBufferToTexture({ buffer, ...textureDataLayout }, textureCopyView, size);
+        encoder.copyBufferToTexture({ buffer, ...textureDataLayout }, textureCopyView, copySize);
         this.device.defaultQueue.submit([encoder.finish()]);
 
         break;
@@ -108,44 +140,39 @@ class CopyBetweenLinearDataAndTextureTest extends GPUTest {
     }
   }
 
-  check(
-    textureCopyView: GPUTextureCopyView,
-    origin: Required<GPUOrigin3DDict>,
+  checkData(
+    { texture, mipLevel, origin }: TextureCopyViewWithRequiredOrigin,
     textureDataLayout: GPUTextureDataLayout,
     format: GPUTextureFormat,
-    size: GPUExtent3DDict,
+    checkSize: GPUExtent3DDict,
     expected: Uint8Array
   ): void {
     const buffer = this.device.createBuffer({
-      size: expected.byteLength + 4,
+      size: expected.byteLength + 3, // the additional 3 bytes are needed for expectContents
       usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
     });
 
     const encoder = this.device.createCommandEncoder();
-    encoder.copyTextureToBuffer(textureCopyView, { buffer, ...textureDataLayout }, size);
+    encoder.copyTextureToBuffer(
+      { texture, mipLevel, origin },
+      { buffer, ...textureDataLayout },
+      checkSize
+    );
     this.device.defaultQueue.submit([encoder.finish()]);
 
-    for (let y = 0; y < size.height / kTextureFormatInfo[format].blockHeight!; ++y) {
-      for (let z = 0; z < size.depth; ++z) {
-        const texel = {
-          x: origin.x,
-          y: origin.y + y * kTextureFormatInfo[format].blockHeight!,
-          z: origin.z + z,
-        };
-        const rowOffset = getTexelOffsetInBytes(textureDataLayout, format, texel, origin);
-        const rowLength =
-          (size.width / kTextureFormatInfo[format].blockWidth!) *
-          kTextureFormatInfo[format].bytesPerBlock!;
-        this.expectContents(buffer, expected.slice(rowOffset, rowOffset + rowLength), rowOffset);
-      }
+    for (const texel of this.iterateBlockRows(checkSize, origin, format)) {
+      const rowOffset = this.getTexelOffsetInBytes(textureDataLayout, format, texel, origin);
+      const rowLength =
+        (checkSize.width / kTextureFormatInfo[format].blockWidth!) *
+        kTextureFormatInfo[format].bytesPerBlock!;
+      this.expectContents(buffer, expected.slice(rowOffset, rowOffset + rowLength), rowOffset);
     }
   }
 
   getFullData(
-    textureCopyView: GPUTextureCopyView,
+    { texture, mipLevel }: { texture: GPUTexture; mipLevel: number | undefined },
     fullTextureCopyLayout: TextureCopyLayout
   ): GPUBuffer {
-    const { texture, mipLevel } = textureCopyView;
     const { mipSize, byteLength, bytesPerRow, rowsPerImage } = fullTextureCopyLayout;
     const buffer = this.device.createBuffer({
       size: byteLength + 3, // the additional 3 bytes are needed for expectContents
@@ -164,68 +191,67 @@ class CopyBetweenLinearDataAndTextureTest extends GPUTest {
   }
 
   updateFullData(
-    format: GPUTextureFormat,
-    textureDataLayout: GPUTextureDataLayout,
     fullTextureCopyLayout: TextureCopyLayout,
+    texturePartialDataLayout: GPUTextureDataLayout,
     copySize: GPUExtent3DDict,
     origin: Required<GPUOrigin3DDict>,
+    format: GPUTextureFormat,
     fullData: Uint8Array,
     partialData: Uint8Array
   ): void {
-    const { bytesPerRow, rowsPerImage } = fullTextureCopyLayout;
-
-    for (let y = 0; y < copySize.height / kTextureFormatInfo[format].blockHeight!; ++y) {
-      for (let z = 0; z < copySize.depth; ++z) {
-        const texel = {
-          x: origin.x,
-          y: origin.y + y * kTextureFormatInfo[format].blockHeight!,
-          z: origin.z + z,
-        };
-        const partialDataOffset = getTexelOffsetInBytes(textureDataLayout, format, texel, origin);
-        const fullDataOffset = getTexelOffsetInBytes(
-          { bytesPerRow, rowsPerImage, offset: 0 },
-          format,
-          texel
-        );
-        const rowLength =
-          (copySize.width / kTextureFormatInfo[format].blockWidth!) *
-          kTextureFormatInfo[format].bytesPerBlock!;
-        for (let b = 0; b < rowLength; ++b) {
-          fullData[fullDataOffset + b] = partialData[partialDataOffset + b];
-        }
+    for (const texel of this.iterateBlockRows(copySize, origin, format)) {
+      const partialDataOffset = this.getTexelOffsetInBytes(
+        texturePartialDataLayout,
+        format,
+        texel,
+        origin
+      );
+      const fullDataOffset = this.getTexelOffsetInBytes(
+        {
+          bytesPerRow: fullTextureCopyLayout.bytesPerRow,
+          rowsPerImage: fullTextureCopyLayout.rowsPerImage,
+          offset: 0,
+        },
+        format,
+        texel
+      );
+      const rowLength =
+        (copySize.width / kTextureFormatInfo[format].blockWidth!) *
+        kTextureFormatInfo[format].bytesPerBlock!;
+      for (let b = 0; b < rowLength; ++b) {
+        fullData[fullDataOffset + b] = partialData[partialDataOffset + b];
       }
     }
   }
 
   fullCheck(
+    { texture, mipLevel, origin }: TextureCopyViewWithRequiredOrigin,
     fullTextureCopyLayout: TextureCopyLayout,
-    textureCopyView: GPUTextureCopyView,
+    texturePartialDataLayout: GPUTextureDataLayout,
     copySize: GPUExtent3DDict,
-    origin: Required<GPUOrigin3DDict>,
-    textureDataLayout: GPUTextureDataLayout,
     format: GPUTextureFormat,
     fullData: GPUBuffer,
     partialData: Uint8Array
   ): void {
-    const { texture, mipLevel } = textureCopyView;
     const { mipSize, bytesPerRow, rowsPerImage, byteLength } = fullTextureCopyLayout;
     const { dst, begin, end } = this.createAlignedCopyForMapRead(fullData, byteLength, 0);
 
-    this.eventualAsyncExpectation(async _ => {
+    // We add an eventual async expectation which will update the full data and then add
+    // other eventual async expectations that it will be correct.
+    this.eventualAsyncExpectation(async () => {
       await dst.mapAsync(GPUMapMode.READ);
       const actual = new Uint8Array(dst.getMappedRange()).slice(begin, end);
       this.updateFullData(
-        format,
-        textureDataLayout,
         fullTextureCopyLayout,
+        texturePartialDataLayout,
         copySize,
         origin,
+        format,
         actual,
         partialData
       );
-      this.check(
-        { texture, mipLevel },
-        { x: 0, y: 0, z: 0 },
+      this.checkData(
+        { texture, mipLevel, origin: { x: 0, y: 0, z: 0 } },
         { bytesPerRow, rowsPerImage, offset: 0 },
         format,
         { width: mipSize[0], height: mipSize[1], depth: mipSize[2] },
@@ -235,67 +261,74 @@ class CopyBetweenLinearDataAndTextureTest extends GPUTest {
     });
   }
 
-  testRun(
-    textureCopyView: GPUTextureCopyView,
-    textureDesc: GPUTextureDescriptor,
-    textureDataLayout: GPUTextureDataLayout,
-    size: GPUExtent3DDict,
-    {
-      dataSize,
-      origin = { x: 0, y: 0, z: 0 },
-      textureSize,
-      initMethod,
-      checkMethod,
-    }: {
-      dataSize: number;
-      origin?: Required<GPUOrigin3DDict>;
-      textureSize: [number, number, number];
-      initMethod: string;
-      checkMethod: string;
-    }
-  ): void {
+  testRun({
+    textureDataLayout,
+    copySize,
+    dataSize,
+    mipLevel = 0,
+    origin = { x: 0, y: 0, z: 0 },
+    textureSize,
+    format,
+    dimension = '2d',
+    initMethod,
+    checkMethod,
+  }: {
+    textureDataLayout: GPUTextureDataLayout;
+    copySize: GPUExtent3DDict;
+    dataSize: number;
+    mipLevel?: number;
+    origin: Required<GPUOrigin3DDict>;
+    textureSize: [number, number, number];
+    format: GPUTextureFormat;
+    dimension?: GPUTextureDimension;
+    initMethod: string;
+    checkMethod: string;
+  }): void {
+    const texture = this.device.createTexture({
+      size: textureSize,
+      format,
+      dimension,
+      usage: GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST,
+    });
+
     // The additional 3 bytes are needed for expectContents. We don't pass them to initTexture.
     const data = this.generateData(dataSize + 3);
 
     switch (checkMethod) {
       case 'PartialCopyT2B': {
         this.initTexture(
-          textureCopyView,
+          { texture, mipLevel, origin },
           textureDataLayout,
-          size,
+          copySize,
           data.slice(0, dataSize),
           initMethod
         );
 
-        this.check(textureCopyView, origin, textureDataLayout, textureDesc.format, size, data);
+        this.checkData({ texture, mipLevel, origin }, textureDataLayout, format, copySize, data);
 
         break;
       }
       case 'FullCopyT2B': {
-        const fullTextureCopyLayout = getTextureCopyLayout(
-          textureDesc.format,
-          textureDesc.dimension!,
-          textureSize,
-          { mipLevel: textureCopyView.mipLevel! }
-        );
+        const fullTextureCopyLayout = getTextureCopyLayout(format, dimension, textureSize, {
+          mipLevel,
+        });
 
-        const fullData = this.getFullData(textureCopyView, fullTextureCopyLayout);
+        const fullData = this.getFullData({ texture, mipLevel }, fullTextureCopyLayout);
 
         this.initTexture(
-          textureCopyView,
+          { texture, mipLevel, origin },
           textureDataLayout,
-          size,
+          copySize,
           data.slice(0, dataSize),
           initMethod
         );
 
         this.fullCheck(
+          { texture, mipLevel, origin },
           fullTextureCopyLayout,
-          textureCopyView,
-          size,
-          origin,
           textureDataLayout,
-          textureDesc.format,
+          copySize,
+          format,
           fullData,
           data
         );
@@ -308,13 +341,9 @@ class CopyBetweenLinearDataAndTextureTest extends GPUTest {
   }
 }
 
-interface WithFormat {
-  format: GPUTextureFormat;
-}
-
 // This is a helper function used for filtering test parameters
-function formatCopyableWithMethod({ format }: WithFormat): boolean {
-  return kTextureFormatInfo[format].copyable && !kTextureFormatInfo[format].depth;
+function formatCopyableWithMethod({ format }: { format: GPUTextureFormat }): boolean {
+  return kTextureFormatInfo[format].copyDst && kTextureFormatInfo[format].copySrc;
 }
 
 const kAllInitMethods = ['WriteTexture', 'CopyB2T'] as const;
@@ -375,33 +404,26 @@ g.test('copy_with_various_data_paddings')
     const bytesPerRow =
       align(t.bytesInACompleteRow(copyWidth, format), bytesPerRowAlignment) +
       bytesPerRowPadding * bytesPerRowAlignment;
-    const size = { width: copyWidth, height: copyHeight, depth: copyDepth };
+    const copySize = { width: copyWidth, height: copyHeight, depth: copyDepth };
 
     const minDataSize =
-      offset + t.requiredBytesInCopy({ offset, bytesPerRow, rowsPerImage }, format, size);
+      offset + t.requiredBytesInCopy({ offset, bytesPerRow, rowsPerImage }, format, copySize);
 
-    const textureSize: [number, number, number] = [
-      copyWidth + 2 * kTextureFormatInfo[format].blockWidth!,
-      copyHeight + 2 * kTextureFormatInfo[format].blockHeight!,
-      copyDepth + 2,
-    ];
-    const origin = {
-      x: kTextureFormatInfo[format].blockWidth!,
-      y: kTextureFormatInfo[format].blockHeight!,
-      z: 1,
-    };
-    const textureDesc: GPUTextureDescriptor = {
-      size: textureSize,
-      format,
-      dimension: '2d',
-      usage: GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST,
-    };
-    const texture = t.device.createTexture(textureDesc);
-
-    t.testRun({ texture, origin }, textureDesc, { offset, bytesPerRow, rowsPerImage }, size, {
+    t.testRun({
+      textureDataLayout: { offset, bytesPerRow, rowsPerImage },
+      copySize,
       dataSize: minDataSize,
-      origin,
-      textureSize,
+      origin: {
+        x: kTextureFormatInfo[format].blockWidth!,
+        y: kTextureFormatInfo[format].blockHeight!,
+        z: 1,
+      },
+      textureSize: [
+        copyWidth + 2 * kTextureFormatInfo[format].blockWidth!,
+        copyHeight + 2 * kTextureFormatInfo[format].blockHeight!,
+        copyDepth + 2,
+      ],
+      format,
       initMethod,
       checkMethod,
     });
