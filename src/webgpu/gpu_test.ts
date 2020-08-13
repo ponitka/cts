@@ -101,21 +101,26 @@ export class GPUTest extends Fixture {
 
   // TODO: add an expectContents for textures, which logs data: uris on failure
 
+  bufferToMap(
+    src: GPUBuffer,
+    size: number,
+    offset: number
+  ): { dst: GPUBuffer; begin: number; end: number } {
+    const alignedOffset = Math.floor(offset / 4) * 4;
+    const offsetDifference = offset - alignedOffset;
+    const alignedSize = align(size + offsetDifference, 4);
+    const dst = this.createCopyForMapRead(src, alignedOffset, alignedSize);
+    return { dst, begin: offsetDifference, end: offsetDifference + size };
+  }
+
   expectContents(src: GPUBuffer, expected: TypedArrayBufferView, srcOffset: number = 0): void {
-    const byteLength = expected.byteLength;
-    const alignedOffset = Math.floor(srcOffset / 4) * 4;
-    const offsetDifference = srcOffset - alignedOffset;
-    const alignedByteLength = align(byteLength + offsetDifference, 4);
-    const dst = this.createCopyForMapRead(src, alignedOffset, alignedByteLength); //expected.buffer.byteLength);
+    const { dst, begin, end } = this.bufferToMap(src, expected.byteLength, srcOffset);
 
     this.eventualAsyncExpectation(async niceStack => {
       const constructor = expected.constructor as TypedArrayBufferViewConstructor;
       await dst.mapAsync(GPUMapMode.READ);
       const actual = new constructor(dst.getMappedRange());
-      const check = this.checkBuffer(
-        actual.slice(offsetDifference, offsetDifference + byteLength),
-        expected
-      );
+      const check = this.checkBuffer(actual.slice(begin, end), expected);
       if (check !== undefined) {
         niceStack.message = check;
         this.rec.expectationFailed(niceStack);
@@ -131,35 +136,22 @@ export class GPUTest extends Fixture {
     secondOffset: number,
     size: number
   ): void {
-    const firstAlignedOffset = Math.floor(firstOffset / 4) * 4;
-    const firstOffsetDifference = firstOffset - firstAlignedOffset;
-    const firstAlignedSize = align(size + firstOffsetDifference, 4);
-    const firstToMap = this.createCopyForMapRead(first, firstAlignedOffset, firstAlignedSize);
-
-    const secondAlignedOffset = Math.floor(secondOffset / 4) * 4;
-    const secondOffsetDifference = secondOffset - secondAlignedOffset;
-    const secondAlignedSize = align(size + secondOffsetDifference, 4);
-    const secondToMap = this.createCopyForMapRead(second, secondAlignedOffset, secondAlignedSize);
+    const firstToMap = this.bufferToMap(first, size, firstOffset);
+    const secondToMap = this.bufferToMap(second, size, secondOffset);
 
     this.eventualAsyncExpectation(async niceStack => {
-      await secondToMap.mapAsync(GPUMapMode.READ);
-      await firstToMap.mapAsync(GPUMapMode.READ);
+      await firstToMap.dst.mapAsync(GPUMapMode.READ);
+      await secondToMap.dst.mapAsync(GPUMapMode.READ);
       const check = this.checkBuffer(
-        new Uint8Array(firstToMap.getMappedRange()).slice(
-          firstOffsetDifference,
-          firstOffsetDifference + size
-        ),
-        new Uint8Array(secondToMap.getMappedRange()).slice(
-          secondOffsetDifference,
-          secondOffsetDifference + size
-        )
+        new Uint8Array(firstToMap.dst.getMappedRange()).slice(firstToMap.begin, firstToMap.end),
+        new Uint8Array(secondToMap.dst.getMappedRange()).slice(secondToMap.begin, secondToMap.end)
       );
       if (check !== undefined) {
         niceStack.message = check;
         this.rec.expectationFailed(niceStack);
       }
-      firstToMap.destroy();
-      secondToMap.destroy();
+      firstToMap.dst.destroy();
+      secondToMap.dst.destroy();
     });
   }
 
